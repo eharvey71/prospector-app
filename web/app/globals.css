@@ -1,0 +1,320 @@
+/* Prospector design system — light theme, full-width layout.
+   White cards on a cool gray page, one navy nav bar, one blue for actions.
+   Color is reserved for meaning: green = good/success, amber = needs
+   attention, red = bad, blue = action. Rows carry a colored left edge
+   keyed to their state. */
+
+:root {
+  --bg: #f2f5f9;
+  --panel: #ffffff;
+  --panel-alt: #f5f7fa;
+  --border: #e3e8ef;
+  --text: #14181e;
+  --muted: #3f4b5c;   /* secondary text still reads as TEXT, not decoration */
+  --teal: #0e9aa7;
+  --ok: #2f9e63;
+  --warn: #b7791f;
+  --danger: #d64550;
+  --accent: #4a7de2;
+  --purple: #7c5fd3;
+  --navy: #1e2a3a;
+  --shadow: 0 1px 3px rgba(16, 24, 40, .07), 0 1px 2px rgba(16, 24, 40, .04);
+  --radius: 10px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, sans-serif;
+  min-height: 100vh;
+}
+
+h1 { font-size: 20px; font-weight: 650; margin: 14px 0 6px; }
+a { color: var(--accent); }
+
+.container { max-width: 860px; margin: 0 auto; padding: 20px 32px 64px; }
+
+/* ---------- nav: accent-blue bar, white text ---------- */
+.nav {
+  display: flex; gap: 4px; align-items: center;
+  background: var(--accent); border-radius: var(--radius);
+  margin: 0 0 20px; padding: 0 16px;
+  box-shadow: var(--shadow);
+}
+.nav .brand { font-weight: 700; margin-right: 14px; padding: 14px 0; color: #fff; }
+.nav a {
+  padding: 14px 14px; color: rgba(255, 255, 255, .8); text-decoration: none;
+  border-bottom: 3px solid transparent; font-size: 14px;
+}
+.nav a:hover { color: #fff; }
+.nav a.active { color: #fff; font-weight: 650; border-bottom-color: #fff; }
+.nav .spacer { flex: 1; }
+.nav .navmail {
+  color: rgba(255, 255, 255, .75); font-size: 12.5px; margin-right: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px;
+}
+.nav .signout {
+  background: none; border: none; color: rgba(255, 255, 255, .8); cursor: pointer;
+  font-size: 13px; padding: 14px 0;
+}
+.nav .signout:hover { color: #fff; }
+
+/* ---------- inputs & buttons ---------- */
+input, textarea, select {
+  background: #fff; color: var(--text);
+  border: 1px solid #d5dce6; border-radius: 8px;
+  padding: 8px 10px; font: inherit; width: 100%;
+}
+input:focus, textarea:focus, select:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(74, 125, 226, .15);
+}
+input[type="checkbox"] { width: auto; }
+
+.btn, .btn-primary, .btn-ghost {
+  border-radius: 8px; padding: 8px 16px; cursor: pointer; font: inherit;
+  width: auto; display: inline-block; text-decoration: none;
+}
+.btn { background: #fff; color: var(--text); border: 1px solid #d5dce6; }
+.btn:hover { border-color: var(--muted); background: var(--panel-alt); }
+.btn-primary { background: var(--accent); color: #fff; border: none; font-weight: 600; }
+.btn-primary:hover { filter: brightness(1.07); }
+.btn-primary:disabled, .btn:disabled { opacity: .5; cursor: default; }
+.btn-ghost { background: none; border: none; color: var(--accent); padding: 8px 4px; }
+
+.field-label {
+  display: block; font-size: 12.5px; font-weight: 600; color: var(--muted);
+  margin: 12px 0 4px;
+}
+.hint { color: var(--muted); font-size: 12.5px; margin: 4px 0 0; }
+
+/* ---------- header bar (add job + funnel) ---------- */
+.addbar { display: flex; gap: 8px; margin-bottom: 10px; }
+.addbar input { flex: 1; }
+.funnel { color: var(--muted); font-size: 12.5px; margin: 0 0 16px; }
+
+/* ---------- tabs ---------- */
+.tabs {
+  display: flex; gap: 2px; flex-wrap: wrap;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; padding: 3px; margin-bottom: 6px; width: fit-content;
+  box-shadow: var(--shadow);
+}
+.tab {
+  background: none; border: none; color: var(--muted); cursor: pointer;
+  padding: 7px 14px; border-radius: 8px; font: inherit; font-size: 13.5px;
+}
+.tab:hover { color: var(--text); }
+.tab.active { background: var(--accent); color: #fff; font-weight: 600; }
+.tab.active .n, .tab.active .n.hot { color: #fff; }
+.tab .n { margin-left: 6px; font-weight: 700; }
+/* Each pipeline stage owns a color — counts always, background when
+   active. Same mapping as the row stripes. */
+.tab-matches .n   { color: var(--accent); }
+.tab-review .n    { color: var(--purple); }
+.tab-needs_you .n { color: var(--danger); }
+.tab-inflight .n  { color: var(--teal); }
+.tab-done .n      { color: var(--ok); }
+.tab-matches.active   { background: var(--accent); }
+.tab-review.active    { background: var(--purple); }
+.tab-needs_you.active { background: var(--danger); }
+.tab-inflight.active  { background: var(--teal); }
+.tab-done.active      { background: var(--ok); }
+.tabblurb { color: var(--muted); font-size: 12.5px; margin: 0 0 14px; }
+
+/* ---------- job rows ---------- */
+.row {
+  background: var(--panel); border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: var(--radius); margin-bottom: 8px; overflow: hidden;
+  box-shadow: var(--shadow);
+}
+.row.open { border-color: #c6cfdb; border-left-width: 4px; }
+/* State stripe on the left edge — the reference design's best idea. */
+.row.s-accent { border-left-color: var(--accent); }
+.row.s-purple { border-left-color: var(--purple); }
+.row.s-warn   { border-left-color: var(--warn); }
+.row.s-danger { border-left-color: var(--danger); }
+.row.s-ok     { border-left-color: var(--ok); }
+.row.s-muted  { border-left-color: #c3cbd6; }
+.rowhead {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px; cursor: pointer; user-select: none;
+}
+.rowhead:hover { background: var(--panel-alt); }
+.rowhead.static { cursor: default; }
+.rowhead.static:hover { background: none; }
+.rowtitle { flex: 1; min-width: 0; }
+.rowtitle .t { font-weight: 600; font-size: 14.5px; }
+.rowtitle .c { color: var(--muted); margin-left: 8px; font-size: 13px; }
+.rowbody { padding: 4px 16px 16px; border-top: 1px solid var(--border); }
+.chev { color: var(--muted); font-size: 11px; width: 12px; }
+
+/* ---------- pills & chips ---------- */
+.pill {
+  display: inline-block; padding: 1px 9px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; border: 1px solid var(--border);
+  color: var(--muted); background: #fff; white-space: nowrap;
+}
+.pill.ok { color: var(--ok); border-color: #bfe3cd; background: #effaf3; }
+.pill.warn { color: var(--warn); border-color: #ecd9b2; background: #fdf6e8; }
+.pill.danger { color: var(--danger); border-color: #f2c4c8; background: #fdf0f1; }
+.pill.accent { color: var(--accent); border-color: #c4d4f5; background: #f0f4fd; }
+.pill.money { color: var(--ok); }
+
+.chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0 4px; }
+.chip {
+  font-size: 12px; padding: 2px 9px; border-radius: 6px;
+  background: var(--panel-alt); border: 1px solid var(--border); color: var(--muted);
+}
+.chip.ok { color: var(--ok); }
+.chip.warn { color: var(--warn); }
+.chip.danger { color: var(--danger); }
+
+/* ---------- folds (collapsible detail sections) ---------- */
+details.fold { margin: 8px 0; }
+details.fold > summary {
+  cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 600;
+  padding: 4px 0; list-style-position: inside;
+}
+details.fold > summary:hover { color: var(--text); }
+details.fold[open] > summary { color: var(--text); }
+details.fold .foldbody {
+  background: var(--panel-alt); border-radius: 8px; padding: 10px 12px;
+  margin-top: 4px; font-size: 13.5px;
+}
+details.fold.warnline > summary { color: var(--warn); }
+details.fold.dangerline > summary { color: var(--danger); }
+
+/* ---------- page panels (profile/settings sections) ---------- */
+details.panel {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius); margin-bottom: 10px;
+  box-shadow: var(--shadow);
+}
+details.panel > summary {
+  cursor: pointer; font-weight: 650; font-size: 15px;
+  padding: 14px 16px; list-style: none; display: flex; align-items: center;
+}
+details.panel > summary::after {
+  content: "▸"; margin-left: auto; color: var(--muted); font-size: 12px;
+}
+details.panel[open] > summary::after { content: "▾"; }
+details.panel > summary:hover { background: var(--panel-alt); border-radius: var(--radius); }
+details.panel .panelbody { padding: 0 16px 16px; }
+.subcard {
+  background: var(--panel-alt); border: 1px solid var(--border);
+  border-radius: 8px; padding: 12px; margin: 10px 0;
+}
+
+/* ---------- misc ---------- */
+.banner {
+  background: #fdf0f1; border: 1px solid #f2c4c8; color: var(--danger);
+  border-radius: var(--radius); padding: 10px 14px; margin-bottom: 12px; font-size: 13.5px;
+}
+.savebar {
+  position: sticky; bottom: 0; background: var(--bg);
+  padding: 12px 0; border-top: 1px solid var(--border); margin-top: 8px;
+}
+.empty { color: var(--muted); padding: 18px 4px; }
+.letter {
+  width: 100%; min-height: 220px; margin: 10px 0; font-size: 13.5px;
+}
+.actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+
+/* ---------- section tints: colored left edges on settings steps ------- */
+details.panel.tint-blue   { border-left: 4px solid var(--accent); }
+details.panel.tint-green  { border-left: 4px solid var(--ok); }
+details.panel.tint-purple { border-left: 4px solid var(--purple); }
+details.panel.tint-amber  { border-left: 4px solid var(--warn); }
+.stepnum {
+  display: inline-flex; width: 21px; height: 21px; border-radius: 50%;
+  align-items: center; justify-content: center; font-size: 12px;
+  margin-right: 10px; border: 1px solid currentColor; flex: none;
+}
+.stepnum.blue { color: var(--accent); }
+.stepnum.green { color: var(--ok); }
+.stepnum.purple { color: var(--purple); }
+.stepnum.amber { color: var(--warn); }
+.grouphead {
+  font-size: 11.5px; font-weight: 700; letter-spacing: .6px;
+  text-transform: uppercase; color: var(--muted); margin: 18px 0 0;
+}
+.orline {
+  display: flex; align-items: center; gap: 10px; color: var(--muted);
+  font-size: 12.5px; margin: 16px 0 4px;
+}
+.orline::before, .orline::after {
+  content: ""; flex: 1; border-top: 1px solid var(--border);
+}
+
+/* --- shared wait indicator (Busy component / .spinner in buttons) ------- */
+/* currentColor so it stays visible on any background: accent in .busy,
+   white inside .btn-primary, muted inside row meta text. */
+.spinner {
+  width: 15px; height: 15px; flex: none; display: inline-block;
+  border-radius: 50%; box-sizing: border-box; vertical-align: -2px;
+  border: 2.5px solid currentColor; border-top-color: transparent;
+  animation: je-spin .8s linear infinite;
+}
+.spinner.sm { width: 12px; height: 12px; border-width: 2px; margin-right: 7px; }
+.busy {
+  display: inline-flex; align-items: center; gap: 10px;
+  color: var(--accent); font-size: 15px; font-weight: 600; margin: 10px 0;
+}
+@keyframes je-spin { to { transform: rotate(360deg); } }
+
+/* --- inline notice: a failure must not whisper in muted gray -------- */
+.notice {
+  border-radius: var(--radius); padding: 10px 14px; font-size: 13.5px;
+  border: 1px solid var(--border); background: var(--panel);
+  border-left-width: 4px;
+}
+.notice.warn { background: #fdf6e8; border-color: #ecd9b2;
+               border-left-color: var(--warn); color: #7a5310; }
+.notice.danger { background: #fdf0f1; border-color: #f2c4c8;
+                 border-left-color: var(--danger); color: #8f2d35; }
+
+/* A row renders before its posting details arrive; say so instead of
+   showing a bare ellipsis that reads like a missing title. */
+.rowtitle .t.loading { color: var(--muted); font-weight: 500; font-style: italic; }
+
+/* --- phones ------------------------------------------------------------ */
+/* Pages move to a bottom tab bar: thumb-reachable, always visible, one tap
+   each. The top bar keeps only identity (brand, email, sign out), so
+   nothing runs off the edge and the app works in portrait. */
+.tabbar { display: none; }
+
+@media (max-width: 640px) {
+  .container { padding: 12px 14px 86px; }   /* room for the bar */
+  h1 { font-size: 18px; }
+
+  .nav { padding: 0 12px; }
+  .nav a { display: none; }                 /* page links live below now */
+  .nav .brand { padding: 12px 0; }
+  .nav .navmail { max-width: 42vw; font-size: 11.5px; }
+  .nav .signout { padding: 12px 0; }
+
+  .tabbar {
+    display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+    background: var(--panel); border-top: 1px solid var(--border);
+    padding-bottom: env(safe-area-inset-bottom);   /* iPhone home indicator */
+    box-shadow: 0 -1px 3px rgba(16, 24, 40, .06);
+  }
+  .tabbar a {
+    flex: 1; display: flex; flex-direction: column; align-items: center;
+    gap: 2px; padding: 7px 2px 6px; text-decoration: none;
+    color: var(--muted); font-size: 11px; font-weight: 600;
+  }
+  .tabbar a.active { color: var(--accent); }
+  .tabbar a span { line-height: 1.1; }
+
+  .tabs { width: 100%; }
+  .rowhead { gap: 8px; padding: 10px 12px; }
+  .rowbody { padding: 4px 12px 14px; }
+  .actions .btn, .actions .btn-primary { flex: 1 1 auto; text-align: center; }
+  .savebar { bottom: 62px; }                /* clear the tab bar */
+}

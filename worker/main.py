@@ -1,0 +1,183 @@
+"""Cloud Run submission worker.
+
+Receives Cloud Tasks at POST /submit, routes by ATS type:
+  Tier 1  deterministic Playwright adapter (greenhouse, lever)
+  Tier 2  agentic adapter for unknown ATSes (LLM plans, code fills+verifies)
+  Tier 3  escalate to NEEDS_HUMAN with pre-filled answers
+
+HTTP semantics for Cloud Tasks: 2xx = done (success OR handled escalation);
+5xx = retry with backoff. Escalations return 200 on purpose so the queue
+doesn't hammer a form we already know needs a human.
+"""
+from __future__ import annotations
+
+import logging
+import os
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+
+from fastapi import FastAPI, HTTPException, Request
+from google.cloud import firestore
+
+from adapters import get_adapter
+from adapters.base import SubmissionOutcome
+from schemas import AppState, AtsType, SubmitTask
+from state_machine import advance
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("worker")
+
+MAX_ATTEMPTS = int(os.environ.get("MAX_SUBMIT_ATTEMPTS", "3"))
+
+db: firestore.Client | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global db
+    db = firestore.Client()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.get("/healthz")
+async def healthz() -> dict:
+    return {"ok": True}
+
+
+@app.post("/submit")
+async def submit(request: Request) -> dict:
+    assert db is not None
+    task = SubmitTask.model_validate_json(await request.body())
+    log.info("submit task uid=%s app=%s ats=%s", task.uid, task.app_id, task.ats_type)
+
+    # queued -> submitting (idempotency gate: a duplicate delivery finds the
+    # app already past QUEUED and stops here)
+    if not advance(db, task.uid, task.app_id, AppState.QUEUED, AppState.SUBMITTING):
+        log.info("app %s not in QUEUED; duplicate delivery, acking", task.app_id)
+        return {"status": "duplicate"}
+
+    adapter = get_adapter(task.ats_type)
+    if adapter is None:
+        reason = (
+            "Workday requires an account — application prepared, submit it "
+            "yourself at the job URL"
+            if task.ats_type == AtsType.WORKDAY
+            else f"no automated adapter for {task.ats_type.value} — submit manually"
+        )
+        _escalate(task, reason)
+        return {"status": "needs_human"}
+
+    app_ref = (
+        db.collection("users").document(task.uid)
+        .collection("applications").document(task.app_id)
+    )
+    app_data = app_ref.get().to_dict() or {}
+
+    # Hard stop: this application already had a real Submit click (recorded
+    # by the adapter immediately before clicking). A crash, timeout, or
+    # queue redelivery must never file it a second time.
+    clicked_at = (app_data.get("submission") or {}).get("submitClickedAt")
+    if clicked_at:
+        log.warning("app %s already submitted at %s; refusing to resubmit",
+                    task.app_id, clicked_at)
+        _escalate(task,
+                  f"already submitted once ({clicked_at}) but the result was "
+                  f"never confirmed — check your email before applying again; "
+                  f"the engine will not resubmit",
+                  screenshots=(app_data.get("submission") or {}).get("screenshots"))
+        return {"status": "needs_human"}
+
+    user_data = db.collection("users").document(task.uid).get().to_dict() or {}
+    posting = db.collection("jobPostings").document(task.posting_id).get().to_dict() or {}
+
+    attempts = (app_data.get("submission") or {}).get("attempts", 0) + 1
+
+    try:
+        outcome: SubmissionOutcome = await adapter.submit(
+            job_url=task.job_url,
+            profile=user_data,
+            application=app_data,
+            posting=posting,
+            uid=task.uid,
+            app_id=task.app_id,
+        )
+    except Exception as exc:
+        log.exception("adapter crashed app=%s", task.app_id)
+        if attempts >= MAX_ATTEMPTS:
+            _fail(task, attempts, f"crashed after {attempts} attempts: {exc}")
+            return {"status": "failed"}
+        _requeue(task, attempts, str(exc))
+        raise HTTPException(status_code=500, detail="retry")  # Cloud Tasks retries
+
+    if outcome.success:
+        # Record WHAT convinced us, not just that we were convinced.
+        # "submitted" is an inference from the page the site showed after
+        # the click — a confirmation URL, a confirmation phrase, or the
+        # judge's reading of it. Those are not equally strong, and with
+        # only "confirmed by adapter" on the record there is no way to
+        # tell afterwards which one carried an application. The employer's
+        # own confirmation email remains the only actual proof.
+        evidence = outcome.reason or "confirmed by adapter"
+        advance(db, task.uid, task.app_id, AppState.SUBMITTING, AppState.SUBMITTED,
+                note=f"confirmed: {evidence}",
+                extra_fields={
+                    "submission.tier": outcome.tier,
+                    "submission.attempts": attempts,
+                    "submission.screenshots": outcome.screenshots,
+                    "submission.confirmedAt": datetime.now(timezone.utc),
+                    "submission.evidence": evidence,
+                    "submission.error": None,
+                })
+        return {"status": "submitted"}
+
+    # clicked_submit is decisive: once the form was actually submitted, a
+    # retry would file it again, so it escalates no matter what else says.
+    if outcome.clicked_submit or outcome.escalate or attempts >= MAX_ATTEMPTS:
+        _escalate(task, outcome.reason or "adapter escalated", attempts,
+                  outcome.screenshots, outcome.fill_sheet)
+        return {"status": "needs_human"}
+
+    _requeue(task, attempts, outcome.reason or "retryable failure")
+    raise HTTPException(status_code=500, detail="retry")
+
+
+def _escalate(task: SubmitTask, reason: str, attempts: int = 0,
+              screenshots: list[str] | None = None,
+              fill_sheet: list[dict] | None = None) -> None:
+    assert db is not None
+    # Dotted paths, not a whole "submission" map: replacing the map would
+    # erase submitClickedAt, the marker that prevents a second filing.
+    advance(db, task.uid, task.app_id, AppState.SUBMITTING, AppState.NEEDS_HUMAN,
+            note=reason,
+            extra_fields={
+                "submission.tier": 3,
+                "submission.attempts": attempts,
+                "submission.screenshots": screenshots or [],
+                "submission.error": reason,
+                "submission.fill_sheet": fill_sheet or [],
+            })
+
+
+def _fail(task: SubmitTask, attempts: int, reason: str) -> None:
+    assert db is not None
+    advance(db, task.uid, task.app_id, AppState.SUBMITTING, AppState.FAILED,
+            note=reason,
+            extra_fields={"submission.attempts": attempts, "submission.error": reason})
+
+
+def _requeue(task: SubmitTask, attempts: int, reason: str) -> None:
+    """Roll SUBMITTING back to QUEUED so the retried delivery passes the gate.
+
+    Goes through advance() like every other transition: if the app is no
+    longer in SUBMITTING (a sweeper escalated it, a human intervened), the
+    rollback no-ops instead of clobbering their write."""
+    assert db is not None
+    if not advance(db, task.uid, task.app_id, AppState.SUBMITTING, AppState.QUEUED,
+                   note=f"retry {attempts}: {reason}",
+                   extra_fields={"submission.attempts": attempts,
+                                 "submission.error": reason}):
+        log.info("app %s left SUBMITTING before requeue; not rolling back",
+                 task.app_id)

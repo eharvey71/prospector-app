@@ -1,0 +1,24 @@
+{
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "engine",
+      "runtime": "python312",
+      "predeploy": ["./sync_shared.sh"],
+      "ignore": ["venv", ".venv", "__pycache__", "*.pyc"]
+    }
+  ],
+  "hosting": {
+    "public": "web/out",
+    "cleanUrls": true,
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "rewrites": [{ "source": "**", "destination": "/index.html" }]
+  },
+  "storage": {
+    "rules": "storage.rules"
+  }
+}

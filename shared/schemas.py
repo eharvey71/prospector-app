@@ -1,0 +1,363 @@
+"""Shared data contracts for the job engine.
+
+Both /functions and /worker install this package (see their requirements.txt
+referencing ../shared). Firestore documents are validated against these models
+at every boundary so a bad write fails loudly instead of corrupting state.
+"""
+from __future__ import annotations
+
+import hashlib
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Literal, Optional
+
+from pydantic import BaseModel, Field, HttpUrl, field_validator
+
+
+# ---------------------------------------------------------------------------
+# State machine
+# ---------------------------------------------------------------------------
+
+class AppState(str, Enum):
+    DISCOVERED = "discovered"      # posting matched to user, application created
+    MATCHED = "matched"            # scored above threshold, awaiting drafting
+    DRAFTED = "drafted"            # letter + answers generated, critique passed
+    IN_REVIEW = "in_review"        # surfaced to the user in the UI
+    APPROVED = "approved"          # human approved -> enqueue submission
+    REJECTED = "rejected"          # human declined; terminal
+    QUEUED = "queued"              # Cloud Task created
+    SUBMITTING = "submitting"      # worker actively driving the browser
+    SUBMITTED = "submitted"        # confirmed; terminal (until feedback loop)
+    FAILED = "failed"              # exhausted retries; terminal
+    NEEDS_HUMAN = "needs_human"    # escalated with pre-filled answers
+
+
+# Engine-legal transitions. Client-legal transitions are enforced separately
+# in firestore.rules; this map is what the trigger functions check before
+# acting, so a replayed/duplicate event can never double-fire a stage.
+ENGINE_TRANSITIONS: dict[AppState, set[AppState]] = {
+    AppState.DISCOVERED: {AppState.MATCHED, AppState.REJECTED},
+    AppState.MATCHED: {AppState.DRAFTED, AppState.FAILED},
+    AppState.DRAFTED: {AppState.IN_REVIEW},
+    # NEEDS_HUMAN here is the AUTO_SUBMIT=false path: approval hands the
+    # application straight to the person with its answers prepared,
+    # without the worker ever driving a browser.
+    AppState.APPROVED: {AppState.QUEUED, AppState.NEEDS_HUMAN},
+    AppState.QUEUED: {AppState.SUBMITTING},
+    # QUEUED here is the retry rollback: the worker returns a retryable
+    # failure and re-arms the idempotency gate for the redelivered task.
+    AppState.SUBMITTING: {AppState.SUBMITTED, AppState.FAILED,
+                          AppState.NEEDS_HUMAN, AppState.QUEUED},
+}
+
+
+def transition_allowed(before: AppState, after: AppState) -> bool:
+    return after in ENGINE_TRANSITIONS.get(before, set())
+
+
+# ---------------------------------------------------------------------------
+# ATS taxonomy
+# ---------------------------------------------------------------------------
+
+class AtsType(str, Enum):
+    GREENHOUSE = "greenhouse"
+    LEVER = "lever"
+    WORKDAY = "workday"        # discovery only; submission is login-walled (manual)
+    ASHBY = "ashby"                      # public JSON API; submission via Tier 2
+    SMARTRECRUITERS = "smartrecruiters"  # public JSON API; submission via Tier 2
+    WORKABLE = "workable"                # public JSON API; submission via Tier 2
+    UNKNOWN = "unknown"
+
+
+# ---------------------------------------------------------------------------
+# User profile
+# ---------------------------------------------------------------------------
+
+class WorkHistoryItem(BaseModel):
+    company: str
+    title: str
+    start: str                      # "2021-03" — keep as string, months suffice
+    end: Optional[str] = None       # None = current
+    bullets: list[str] = Field(default_factory=list)
+
+
+class EducationItem(BaseModel):
+    school: str
+    degree: str                     # "BS Computer Science"
+    year: Optional[str] = None      # graduation year (or expected)
+    bullets: list[str] = Field(default_factory=list)  # coursework, honors,
+                                                      # activities, GPA
+
+
+class ProjectItem(BaseModel):
+    """Personal/school/open-source projects — for early-career candidates
+    these carry the weight work history carries for experienced ones."""
+    name: str
+    description: str                # what was built, and any outcome
+    tech: list[str] = Field(default_factory=list)
+
+
+class WritingSample(BaseModel):
+    title: str
+    text: str
+
+
+class ScreenerFacts(BaseModel):
+    """Deterministic answers for screening questions nearly every ATS asks.
+    None = not stated — the question escalates to the human instead of being
+    guessed. Judgment/consent questions (AI policy, 'have you interviewed
+    here before') are deliberately NOT represented here."""
+    open_to_relocation: Optional[bool] = None
+    onsite_ok: Optional[bool] = None    # in-person / hybrid / N%-in-office
+
+
+class Preferences(BaseModel):
+    titles: list[str] = Field(default_factory=list)
+    # LLM-expanded variants of titles ("grant writer" -> "development
+    # director", "advancement officer", ...) so the keyword prefilter stops
+    # missing same-job-different-name postings. Regenerated by a trigger
+    # whenever titles change; title_synonyms_source records the titles the
+    # current synonyms were built from (the trigger's loop guard).
+    title_synonyms: list[str] = Field(default_factory=list)
+    title_synonyms_source: list[str] = Field(default_factory=list)
+    # Geographic narrowing: ["Richmond, VA", ...]. Empty = anywhere.
+    # Enforced in the matcher's prefilter, BEFORE any LLM spend.
+    locations: list[str] = Field(default_factory=list)
+    # One work-arrangement control (replaces the remote_only/remote_ok
+    # checkbox pair, which contradicted each other):
+    #   local_or_remote  jobs in my places, plus fully-remote jobs
+    #   local_only       only jobs in my places; remote-only postings skip
+    #   remote_only      only remote postings, wherever the company is
+    work_mode: str = "local_or_remote"
+    # Legacy flags, still read for docs saved before work_mode existed.
+    remote_only: bool = False
+    remote_ok: bool = True
+    exclude_companies: list[str] = Field(default_factory=list)
+    min_match_score: int = 70       # 0-100 gate before drafting
+    auto_draft: bool = False        # True: every match immediately gets a
+                                    # letter (several LLM calls each).
+                                    # False (default): matches wait for a manual
+                                    # "write the letter" per application
+    # Salary questions are knockout traps: a number above the band can
+    # auto-reject. "exact" states the target; "range" wraps it in a range;
+    # "negotiable" gives no number.
+    salary_strategy: str = "exact"
+    # Build a per-application resume PDF from profile facts, reordered and
+    # reworded against the posting (identity fields verbatim). False: the
+    # uploaded resume.pdf is attached everywhere.
+    tailor_resume: bool = False
+    # Once-a-day email digest of new matches (never per-match: a crawl can
+    # surface a dozen at once). Delivered by the Trigger Email extension.
+    email_matches: bool = False
+
+
+class SelfIdentification(BaseModel):
+    """Voluntary EEO self-identification, stored as the standard wordings
+    the user picked in Profile. Filled ONLY by the browser extension while
+    the human watches and reviews — the unattended worker never answers
+    demographics. None = unset: the question is left blank for the user."""
+    gender: Optional[str] = None
+    hispanic_latino: Optional[str] = None
+    race: Optional[str] = None
+    veteran_status: Optional[str] = None
+    disability_status: Optional[str] = None
+
+
+class UserProfile(BaseModel):
+    name: str
+    email: str
+    phone: Optional[str] = None
+    linkedin: Optional[str] = None      # profile URL — asked on most forms
+    website: Optional[str] = None       # portfolio/personal site
+    location: Optional[str] = None
+    # "entry" (new to the job market: score on education/projects/potential),
+    # "some" (a few years), "experienced" (default; score on work history).
+    career_stage: str = "experienced"
+    work_auth: Optional[str] = None
+    salary_target: Optional[str] = None
+    skills: list[str] = Field(default_factory=list)
+    work_history: list[WorkHistoryItem] = Field(default_factory=list)
+    education: list[EducationItem] = Field(default_factory=list)
+    projects: list[ProjectItem] = Field(default_factory=list)
+    writing_samples: list[WritingSample] = Field(default_factory=list)
+    screeners: ScreenerFacts = Field(default_factory=ScreenerFacts)
+    selfid: SelfIdentification = Field(default_factory=SelfIdentification)
+    preferences: Preferences = Field(default_factory=Preferences)
+
+
+# ---------------------------------------------------------------------------
+# Job postings
+# ---------------------------------------------------------------------------
+
+class JobPosting(BaseModel):
+    source: AtsType
+    external_id: str                # ID within the source system
+    company: str
+    title: str
+    url: HttpUrl
+    location: Optional[str] = None
+    description_text: str = ""
+    parsed_requirements: list[str] = Field(default_factory=list)
+    first_seen: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    active: bool = True
+
+    @property
+    def posting_id(self) -> str:
+        """Deterministic doc ID -> writes are natural upserts, dedup for free."""
+        raw = f"{self.source.value}:{self.company.lower()}:{self.external_id}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+
+# ---------------------------------------------------------------------------
+# Applications
+# ---------------------------------------------------------------------------
+
+class RedFlag(BaseModel):
+    """One structured concern from matching. Field descriptions double as
+    LLM instructions — generate_structured() embeds this schema in the
+    system prompt."""
+    severity: Literal["blocker", "concern"] = Field(
+        default="concern",
+        description=(
+            "'blocker' ONLY for a hard requirement stated in the posting that "
+            "the candidate clearly fails (location, clearance, license, "
+            "explicit years in a named domain). Everything else is 'concern'."
+        ),
+    )
+    topic: str = Field(
+        default="",
+        description="2-4 word label, e.g. 'Location' or 'No shipped LLM work'.",
+    )
+    detail: str = Field(
+        description="One short sentence explaining the flag. No compound lists.",
+    )
+
+
+class RubricDimension(BaseModel):
+    rating: int = Field(ge=0, le=10, description="0 = no fit at all, 10 = ideal")
+    why: str = Field(default="", description="one short sentence of evidence")
+
+
+class MatchRubric(BaseModel):
+    """Sub-scores the LLM emits; CODE computes the 0-100 score from these.
+    (Asked for a bare 0-100, LLMs collapse onto favorite numerals — nearly
+    every score ended in 2 — so the model never writes the final number.)"""
+    skills: RubricDimension = Field(
+        description="overlap between the candidate's skills/experience and "
+                    "what the posting actually requires")
+    seniority: RubricDimension = Field(
+        description="level match: would they be hired at this level — "
+                    "neither underqualified nor wildly overqualified")
+    domain: RubricDimension = Field(
+        description="sector/industry familiarity the posting cares about")
+    logistics: RubricDimension = Field(
+        description="location/remote/authorization practicality")
+
+
+class MatchResult(BaseModel):
+    score: int = Field(ge=0, le=100)
+    # dimension -> 0-10 rating, kept for display/debugging ("domain 2/10")
+    rubric: dict[str, int] = Field(default_factory=dict)
+    # Salary/compensation stated IN the posting, verbatim (None = not stated)
+    posting_salary: Optional[str] = None
+    summary: str = Field(
+        default="",
+        description=(
+            "One plain-English sentence: the verdict you would say out loud "
+            "to the candidate about this fit."
+        ),
+    )
+    reasons: list[str] = Field(
+        default_factory=list,
+        max_length=5,
+        description=(
+            "3-5 items, each ONE short sentence tying the candidate's actual "
+            "history to a stated need of the job."
+        ),
+    )
+    red_flags: list[RedFlag] = Field(
+        default_factory=list,
+        max_length=5,
+        description=(
+            "At most 5, most serious first. Do not restate the same gap in "
+            "different words."
+        ),
+    )
+
+    @field_validator("red_flags", mode="before")
+    @classmethod
+    def _coerce_legacy_flags(cls, v: object) -> object:
+        """Pre-2026-07 documents stored red_flags as plain strings. Also
+        truncate instead of failing when the model ignores the cap."""
+        if isinstance(v, list):
+            return [{"detail": f} if isinstance(f, str) else f for f in v][:5]
+        return v
+
+    @field_validator("reasons", mode="before")
+    @classmethod
+    def _cap_reasons(cls, v: object) -> object:
+        return v[:5] if isinstance(v, list) else v
+
+
+class Letter(BaseModel):
+    text: str
+    version: int = 1
+    critique_passed: bool = False
+    critique_notes: list[str] = Field(default_factory=list)
+
+
+class ScreeningAnswers(BaseModel):
+    why_company: Optional[str] = None
+    salary: Optional[str] = None
+    work_auth: Optional[str] = None
+    extra: dict[str, str] = Field(default_factory=dict)
+
+
+class SubmissionRecord(BaseModel):
+    tier: Optional[int] = None      # 1 deterministic, 2 agentic, 3 human
+    attempts: int = 0
+    screenshots: list[str] = Field(default_factory=list)  # Storage paths
+    # What the adapter filled (or prepared) before escalating, so the human
+    # can finish the form from a checklist instead of re-deriving answers:
+    # [{"field": label, "value": str|None, "status": "filled"|"needs_you"}]
+    fill_sheet: list[dict] = Field(default_factory=list)
+    confirmed_at: Optional[datetime] = None
+    error: Optional[str] = None
+
+
+class StateEvent(BaseModel):
+    state: AppState
+    ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    note: Optional[str] = None
+
+
+class Application(BaseModel):
+    posting_id: str
+    user_added: bool = False        # pasted/added by the user: bypasses the
+                                    # score gate only. Drafting still obeys
+                                    # preferences.auto_draft.
+    state: AppState = AppState.DISCOVERED
+    state_history: list[StateEvent] = Field(default_factory=list)
+    match: Optional[MatchResult] = None
+    letter: Optional[Letter] = None
+    screening_answers: Optional[ScreeningAnswers] = None
+    submission: SubmissionRecord = Field(default_factory=SubmissionRecord)
+    # Storage path of the tailored per-application resume PDF; None -> the
+    # worker falls back to the uploaded users/{uid}/resume.pdf.
+    resume_path: Optional[str] = None
+    review_note: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ---------------------------------------------------------------------------
+# Cloud Task payload: functions -> worker
+# ---------------------------------------------------------------------------
+
+class SubmitTask(BaseModel):
+    uid: str
+    app_id: str
+    posting_id: str
+    ats_type: AtsType
+    job_url: str

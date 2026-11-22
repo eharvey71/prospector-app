@@ -1,0 +1,133 @@
+rules_version = '2';
+
+// Principles:
+// - Users can read/write ONLY their own subtree (users/{uid}/**), with
+//   field-level guards on state transitions they are allowed to make.
+// - jobPostings are global, readable by any signed-in user, writable only
+//   by the engine (Admin SDK bypasses rules, so no client write path exists).
+// - Everything else is denied by default.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    // Admin = custom auth claim, set by scripts/set_admin.py (Admin SDK).
+    function isAdmin() {
+      return signedIn() && request.auth.token.admin == true;
+    }
+
+    // ------------------------------------------------------------------
+    // Global job postings: read-only to clients. The discovery functions
+    // write these through the Admin SDK, which bypasses these rules.
+    // ------------------------------------------------------------------
+    match /jobPostings/{postingId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    // Engine health — global, engine-written, never client-written.
+    //
+    // Crawl status and error counters stay readable by any signed-in user:
+    // they answer "why is my queue empty" without an admin.
+    //
+    // The llm* documents do not. They carry token spend and per-model cost
+    // for the WHOLE install (llm, llm_<day>, llm_model_<m>_<day>,
+    // llm_role_<r>_<day>), which is the operator's business, not every
+    // account's.
+    match /health/{docId} {
+      allow read: if isAdmin() || (signedIn() && !docId.matches('^llm.*'));
+      allow write: if false;
+    }
+
+    // ------------------------------------------------------------------
+    // Per-user data
+    // ------------------------------------------------------------------
+    // Global board catalog, curated by the admin, complements per-user
+    // watchlists. Lives under a subcollection NAMED "watchlist" so the
+    // crawler's collection_group("watchlist") union picks it up unchanged.
+    match /config/global/watchlist/{docId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /users/{uid} {
+      // Admin may read (the admin page lists users for enrollment);
+      // writes stay owner-only.
+      allow read: if isOwner(uid) || isAdmin();
+      // Profile edits from the client are fine; the engine also writes here.
+      allow create, update: if isOwner(uid);
+      allow delete: if false;
+
+      // Applications: clients may only perform the transitions a human is
+      // supposed to make (approve / reject / edit letter while in review).
+      // All other state moves come from the engine via Admin SDK.
+      match /applications/{appId} {
+        // Admin read is for the admin panel's per-user result stats
+        // (aggregation counts); writes remain owner/engine-only.
+        allow read: if isOwner(uid) || isAdmin();
+        allow create: if false; // engine-only
+        allow delete: if false;
+
+        allow update: if isOwner(uid)
+          && clientTransitionAllowed()
+          && onlyEditableFieldsChanged();
+
+        function clientTransitionAllowed() {
+          let before = resource.data.state;
+          let after = request.resource.data.state;
+          // No state change at all (e.g. editing the letter text), or one of
+          // the human-owned transitions.
+          return (before == after)
+            || (before == 'matched' && after == 'rejected')
+            // Apply without a letter: skip drafting, go straight to review.
+            || (before == 'matched' && after == 'in_review')
+            // Un-skip: bring a rejected job back into the pipeline.
+            || (before == 'rejected' && after == 'matched')
+            || (before == 'in_review' && after in ['approved', 'rejected'])
+            || (before == 'needs_human' && after in ['submitted', 'rejected'])
+            // Human-owned retries out of failed: back to matched re-drafts
+            // (no letter yet); back to in_review re-approves an existing
+            // letter for another submission attempt.
+            || (before == 'failed' && after in ['matched', 'in_review']);
+        }
+
+        function onlyEditableFieldsChanged() {
+          // Clients may touch: state, letter, screeningAnswers, reviewNote,
+          // and the skip-reason label captured on rejection.
+          return request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['state', 'stateHistory', 'letter', 'screeningAnswers', 'reviewNote', 'rejection_reason', 'updatedAt']);
+        }
+      }
+
+      // Company watchlist the discovery crawler reads.
+      match /watchlist/{docId} {
+        allow read, write: if isOwner(uid);
+      }
+
+      // Funnel counters the matcher writes (engine-only writes).
+      match /stats/{docId} {
+        allow read: if isOwner(uid) || isAdmin();
+        allow write: if false;
+      }
+
+      // LLM extraction from an uploaded resume, staged for review in the
+      // profile UI. Engine-written via Admin SDK; clients read it and may
+      // delete it once applied or dismissed.
+      match /resume_extraction/{docId} {
+        allow read, delete: if isOwner(uid);
+        allow create, update: if false;
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
