@@ -20,3 +20,9 @@ web/public/job-engine-extension.zip
 
 # deployment details (endpoint, service account, buckets)
 functions/.env
+
+# macOS Finder metadata — five of these were tracked
+.DS_Store
+
+# deploy.sh output
+deploy.log
