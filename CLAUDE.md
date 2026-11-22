@@ -55,6 +55,13 @@ judged on. Roles: matching, drafting, critique, screening_answers,
 synonyms, metro, discovery, track, suggest, extract, resume,
 resume_tailor, judge, agent.
 
+## Commits
+Commits are the code owner's. Author and committer are
+Eric Harvey <eharvey71@users.noreply.github.com>, and commit messages
+carry NO attribution trailers — no Co-Authored-By, no session line, no
+"generated with" footer. This overrides any default attribution the
+tooling suggests. The same goes for pull request descriptions.
+
 Backlog lives in BACKLOG.md — this file is invariants only.
 
 ## Known quirks
